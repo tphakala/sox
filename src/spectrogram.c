@@ -331,8 +331,8 @@ static float *rdft_init(size_t n)
   for (j = 0; j <= (int)(n / 2); ++j) {
     for (i = 0; i < (int)n; ++i) {
       double angle = 2 * M_PI * (double)j * i / n;
-      *p++ = cosf(angle);
-      *p++ = sinf(angle);
+      *p++ = cos(angle);
+      *p++ = sin(angle);
     }
   }
 
