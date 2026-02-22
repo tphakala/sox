@@ -324,14 +324,15 @@ static float make_window(priv_t *p, int end)
 
 static float *rdft_init(size_t n)
 {
-  float *q = lsx_malloc(2 * (n / 2 + 1) * n * sizeof(*q));
+  float *q = lsx_malloc((size_t)2 * (n / 2 + 1) * n * sizeof(*q));
   float *p = q;
   int i, j;
 
   for (j = 0; j <= (int)(n / 2); ++j) {
     for (i = 0; i < (int)n; ++i) {
-      *p++ = cosf(2 * M_PI * j * i / n);
-      *p++ = sinf(2 * M_PI * j * i / n);
+      double angle = 2 * M_PI * (double)j * i / n;
+      *p++ = cosf(angle);
+      *p++ = sinf(angle);
     }
   }
 
@@ -452,7 +453,7 @@ static int start(sox_effect_t *effp)
 
   /* Pre-allocate dBfs buffer when x_size is known */
   if (p->x_size) {
-    p->dBfs = lsx_calloc(p->x_size * p->rows, sizeof(*p->dBfs));
+    p->dBfs = lsx_calloc((size_t)p->x_size * p->rows, sizeof(*p->dBfs));
     p->dBfs_capacity = p->x_size;
   }
 
@@ -474,7 +475,7 @@ static int do_column(sox_effect_t *effp)
   ++p->cols;
   if (p->cols > p->dBfs_capacity) {
     p->dBfs_capacity = p->dBfs_capacity ? p->dBfs_capacity * 2 : 256;
-    p->dBfs = lsx_realloc(p->dBfs, p->dBfs_capacity * p->rows * sizeof(*p->dBfs));
+    p->dBfs = lsx_realloc(p->dBfs, (size_t)p->dBfs_capacity * p->rows * sizeof(*p->dBfs));
   }
 
   for (i = 0; i < p->rows; ++i) {

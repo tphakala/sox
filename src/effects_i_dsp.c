@@ -166,14 +166,15 @@ static int fft_len_f = -1;
 static ccrw2_t fft_cache_ccrw;
 #endif
 
+#define ASSERT_FFT_UNINIT(len_var, br_var, sc_var) \
+  assert(br_var == NULL); assert(sc_var == NULL); assert(len_var == -1)
+#define CLEAR_FFT_VARS(len_var, br_var, sc_var) \
+  free(br_var); free(sc_var); sc_var = NULL; br_var = NULL; len_var = -1
+
 void init_fft_cache(void)
 {
-  assert(lsx_fft_br == NULL);
-  assert(lsx_fft_sc == NULL);
-  assert(fft_len == -1);
-  assert(lsx_fft_br_f == NULL);
-  assert(lsx_fft_sc_f == NULL);
-  assert(fft_len_f == -1);
+  ASSERT_FFT_UNINIT(fft_len, lsx_fft_br, lsx_fft_sc);
+  ASSERT_FFT_UNINIT(fft_len_f, lsx_fft_br_f, lsx_fft_sc_f);
   ccrw2_init(fft_cache_ccrw);
   fft_len = 0;
   fft_len_f = 0;
@@ -184,40 +185,38 @@ void clear_fft_cache(void)
   assert(fft_len >= 0);
   assert(fft_len_f >= 0);
   ccrw2_clear(fft_cache_ccrw);
-  free(lsx_fft_br);
-  free(lsx_fft_sc);
-  lsx_fft_sc = NULL;
-  lsx_fft_br = NULL;
-  fft_len = -1;
-  free(lsx_fft_br_f);
-  free(lsx_fft_sc_f);
-  lsx_fft_sc_f = NULL;
-  lsx_fft_br_f = NULL;
-  fft_len_f = -1;
+  CLEAR_FFT_VARS(fft_len, lsx_fft_br, lsx_fft_sc);
+  CLEAR_FFT_VARS(fft_len_f, lsx_fft_br_f, lsx_fft_sc_f);
 }
 
-static sox_bool update_fft_cache(int len)
-{
-  assert(lsx_is_power_of_2(len));
-  assert(fft_len >= 0);
-  ccrw2_become_reader(fft_cache_ccrw);
-  if (len > fft_len) {
-    ccrw2_cease_reading(fft_cache_ccrw);
-    ccrw2_become_writer(fft_cache_ccrw);
-    if (len > fft_len) {
-      int old_n = fft_len;
-      fft_len = len;
-      lsx_fft_br = lsx_realloc(lsx_fft_br, dft_br_len(fft_len) * sizeof(*lsx_fft_br));
-      lsx_fft_sc = lsx_realloc(lsx_fft_sc, dft_sc_len(fft_len) * sizeof(*lsx_fft_sc));
-      if (!old_n)
-        lsx_fft_br[0] = 0;
-      return sox_true;
-    }
-    ccrw2_cease_writing(fft_cache_ccrw);
-    ccrw2_become_reader(fft_cache_ccrw);
-  }
-  return sox_false;
+/* Macro to define update_fft_cache variants for double and float.
+ * Uses double-checked locking via ccrw2 to resize FFT work arrays. */
+#define DEFINE_UPDATE_FFT_CACHE(suffix, len_var, br_var, sc_var)       \
+static sox_bool update_fft_cache##suffix(int len)                      \
+{                                                                      \
+  assert(lsx_is_power_of_2(len));                                      \
+  assert(len_var >= 0);                                                \
+  ccrw2_become_reader(fft_cache_ccrw);                                 \
+  if (len > len_var) {                                                 \
+    ccrw2_cease_reading(fft_cache_ccrw);                               \
+    ccrw2_become_writer(fft_cache_ccrw);                               \
+    if (len > len_var) {                                               \
+      int old_n = len_var;                                             \
+      len_var = len;                                                   \
+      br_var = lsx_realloc(br_var, dft_br_len(len_var) * sizeof(*br_var)); \
+      sc_var = lsx_realloc(sc_var, dft_sc_len(len_var) * sizeof(*sc_var)); \
+      if (!old_n)                                                      \
+        br_var[0] = 0;                                                 \
+      return sox_true;                                                 \
+    }                                                                  \
+    ccrw2_cease_writing(fft_cache_ccrw);                               \
+    ccrw2_become_reader(fft_cache_ccrw);                               \
+  }                                                                    \
+  return sox_false;                                                    \
 }
+
+DEFINE_UPDATE_FFT_CACHE(, fft_len, lsx_fft_br, lsx_fft_sc)
+DEFINE_UPDATE_FFT_CACHE(_f, fft_len_f, lsx_fft_br_f, lsx_fft_sc_f)
 
 static void done_with_fft_cache(sox_bool is_writer)
 {
@@ -238,29 +237,6 @@ void lsx_safe_cdft(int len, int type, double * d)
   sox_bool is_writer = update_fft_cache(len);
   lsx_cdft(len, type, d, lsx_fft_br, lsx_fft_sc);
   done_with_fft_cache(is_writer);
-}
-
-static sox_bool update_fft_cache_f(int len)
-{
-  assert(lsx_is_power_of_2(len));
-  assert(fft_len_f >= 0);
-  ccrw2_become_reader(fft_cache_ccrw);
-  if (len > fft_len_f) {
-    ccrw2_cease_reading(fft_cache_ccrw);
-    ccrw2_become_writer(fft_cache_ccrw);
-    if (len > fft_len_f) {
-      int old_n = fft_len_f;
-      fft_len_f = len;
-      lsx_fft_br_f = lsx_realloc(lsx_fft_br_f, dft_br_len(fft_len_f) * sizeof(*lsx_fft_br_f));
-      lsx_fft_sc_f = lsx_realloc(lsx_fft_sc_f, dft_sc_len(fft_len_f) * sizeof(*lsx_fft_sc_f));
-      if (!old_n)
-        lsx_fft_br_f[0] = 0;
-      return sox_true;
-    }
-    ccrw2_cease_writing(fft_cache_ccrw);
-    ccrw2_become_reader(fft_cache_ccrw);
-  }
-  return sox_false;
 }
 
 void lsx_safe_rdft_f(int len, int type, float * d)
