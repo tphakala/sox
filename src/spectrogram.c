@@ -94,8 +94,8 @@ typedef struct {
   sox_bool   using_stdout; /* output image to stdout */
 
   /* Shared work area */
-  double     *shared;
-  double     **shared_ptr;
+  float      *shared;
+  float      **shared_ptr;
 
   /* Per-channel work area */
   int        WORK;  /* Start of work area is marked by this dummy variable. */
@@ -112,12 +112,13 @@ typedef struct {
   int        end_min;
   int        last_end;
   sox_bool   truncated;
-  double     *buf;              /* [dft_size] */
-  double     *dft_buf;          /* [dft_size] */
-  double     *window;           /* [dft_size + 1] */
-  double     block_norm;
-  double     max;
-  double     *magnitudes;       /* [dft_size / 2 + 1] */
+  int        dBfs_capacity;     /* allocated columns for dBfs */
+  float      *buf;              /* [dft_size] */
+  float      *dft_buf;          /* [dft_size] */
+  float      *window;           /* [dft_size + 1] */
+  float      block_norm;
+  float      max;
+  float      *magnitudes;       /* [dft_size / 2 + 1] */
   float      *dBfs;
 } priv_t;
 
@@ -277,16 +278,16 @@ static int getopts(sox_effect_t *effp, int argc, char **argv)
     lsx_usage(effp) : SOX_SUCCESS;
 }
 
-static double make_window(priv_t *p, int end)
+static float make_window(priv_t *p, int end)
 {
-  double sum = 0;
-  double *w = end < 0 ? p->window : p->window + end;
-  double beta;
+  /* Window functions (except Hann) only have double variants,
+   * so compute in a temporary double array, then copy to float.
+   * This runs once per window change (typically once at start). */
+  double *dw = lsx_calloc(p->dft_size + 1, sizeof(*dw));
+  double sum = 0, beta;
+  double *w = end < 0 ? dw : dw + end;
   int n = 1 + p->dft_size - abs(end);
   int i;
-
-  if (end)
-    memset(p->window, 0, sizeof(*p->window) * (p->dft_size + 1));
 
   for (i = 0; i < n; ++i)
     w[i] = 1;
@@ -307,25 +308,30 @@ static double make_window(priv_t *p, int end)
   }
 
   for (i = 0; i < p->dft_size; ++i)
-    sum += p->window[i];
+    sum += dw[i];
 
   /* empirical small window adjustment */
   for (--n, i = 0; i < p->dft_size; ++i)
-    p->window[i] *= 2 / sum * sqr((double)n / p->dft_size);
+    dw[i] *= 2 / sum * sqr((double)n / p->dft_size);
 
-  return sum;
+  /* Copy to float window buffer */
+  for (i = 0; i < p->dft_size; ++i)
+    p->window[i] = (float)dw[i];
+
+  free(dw);
+  return (float)sum;
 }
 
-static double *rdft_init(size_t n)
+static float *rdft_init(size_t n)
 {
-  double *q = lsx_malloc(2 * (n / 2 + 1) * n * sizeof(*q));
-  double *p = q;
+  float *q = lsx_malloc(2 * (n / 2 + 1) * n * sizeof(*q));
+  float *p = q;
   int i, j;
 
-  for (j = 0; j <= n / 2; ++j) {
-    for (i = 0; i < n; ++i) {
-      *p++ = cos(2 * M_PI * j * i / n);
-      *p++ = sin(2 * M_PI * j * i / n);
+  for (j = 0; j <= (int)(n / 2); ++j) {
+    for (i = 0; i < (int)n; ++i) {
+      *p++ = cosf(2 * M_PI * j * i / n);
+      *p++ = sinf(2 * M_PI * j * i / n);
     }
   }
 
@@ -333,12 +339,13 @@ static double *rdft_init(size_t n)
 }
 
 #define _ re += in[i] * *q++, im += in[i++] * *q++,
-static void rdft_p(const double *q, const double *in, double *out, int n)
+static void rdft_p(const float * __restrict q, const float * __restrict in,
+    float * __restrict out, int n)
 {
   int i, j;
 
   for (j = 0; j <= n / 2; ++j) {
-    double re = 0, im = 0;
+    float re = 0, im = 0;
 
     for (i = 0; i < (n & ~7);)
       _ _ _ _ _ _ _ _ (void)0;
@@ -421,7 +428,7 @@ static int start(sox_effect_t *effp)
   p->magnitudes = lsx_calloc(p->dft_size / 2 + 1, sizeof(*p->magnitudes));
 
   if (is_p2(p->dft_size) && !effp->flow)
-    lsx_safe_rdft(p->dft_size, 1, p->dft_buf);
+    lsx_safe_rdft_f(p->dft_size, 1, p->dft_buf);
 
   lsx_debug("duration=%g x_size=%i pixels_per_sec=%g dft_size=%i",
             duration, p->x_size, pixels_per_sec, p->dft_size);
@@ -443,6 +450,12 @@ static int start(sox_effect_t *effp)
   p->max = -p->dB_range;
   p->read = (p->step_size - p->dft_size) / 2;
 
+  /* Pre-allocate dBfs buffer when x_size is known */
+  if (p->x_size) {
+    p->dBfs = lsx_calloc(p->x_size * p->rows, sizeof(*p->dBfs));
+    p->dBfs_capacity = p->x_size;
+  }
+
   return SOX_SUCCESS;
 }
 
@@ -459,11 +472,13 @@ static int do_column(sox_effect_t *effp)
   }
 
   ++p->cols;
-  p->dBfs = lsx_realloc(p->dBfs, p->cols * p->rows * sizeof(*p->dBfs));
+  if (p->cols > p->dBfs_capacity) {
+    p->dBfs_capacity = p->dBfs_capacity ? p->dBfs_capacity * 2 : 256;
+    p->dBfs = lsx_realloc(p->dBfs, p->dBfs_capacity * p->rows * sizeof(*p->dBfs));
+  }
 
-  /* FIXME: allocate in larger steps (for several columns) */
   for (i = 0; i < p->rows; ++i) {
-    double dBfs = 10 * log10(p->magnitudes[i] * p->block_norm);
+    float dBfs = 10 * log10f(p->magnitudes[i] * p->block_norm);
     p->dBfs[(p->cols - 1) * p->rows + i] = dBfs + p->gain;
     p->max = max(dBfs, p->max);
   }
@@ -503,7 +518,7 @@ static int flow(sox_effect_t *effp,
 
     for (; len && p->read < p->step_size; --len, ++p->read, --p->end)
       p->buf[p->dft_size - p->step_size + p->read] =
-        SOX_SAMPLE_TO_FLOAT_64BIT(*ibuf++,);
+        SOX_SAMPLE_TO_FLOAT_32BIT(*ibuf++,);
 
     if (p->read != p->step_size)
       break;
@@ -511,11 +526,16 @@ static int flow(sox_effect_t *effp,
     if ((p->end = max(p->end, p->end_min)) != p->last_end)
       make_window(p, p->last_end = p->end);
 
-    for (i = 0; i < p->dft_size; ++i)
-      p->dft_buf[i] = p->buf[i] * p->window[i];
+    {
+      float * __restrict dst = p->dft_buf;
+      const float * __restrict src = p->buf;
+      const float * __restrict win = p->window;
+      for (i = 0; i < p->dft_size; ++i)
+        dst[i] = src[i] * win[i];
+    }
 
     if (is_p2(p->dft_size)) {
-      lsx_safe_rdft(p->dft_size, 1, p->dft_buf);
+      lsx_safe_rdft_f(p->dft_size, 1, p->dft_buf);
       p->magnitudes[0] += sqr(p->dft_buf[0]);
 
       for (i = 1; i < p->dft_size >> 1; ++i)
@@ -551,7 +571,7 @@ static int drain(sox_effect_t *effp, sox_sample_t *obuf_, size_t *osamp)
     p->end = 0, p->end_min = -p->dft_size;
 
     if (flow(effp, ibuf, obuf, &isamp, &isamp) == SOX_SUCCESS && p->block_num) {
-      p->block_norm *= (double)p->block_steps / p->block_num;
+      p->block_norm *= (float)p->block_steps / p->block_num;
       do_column(effp);
     }
 

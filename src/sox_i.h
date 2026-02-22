@@ -91,6 +91,7 @@ void init_fft_cache(void);
 void clear_fft_cache(void);
 #define lsx_is_power_of_2(x) !(x < 2 || (x & (x - 1)))
 void lsx_safe_rdft(int len, int type, double * d);
+void lsx_safe_rdft_f(int len, int type, float * d);
 void lsx_safe_cdft(int len, int type, double * d);
 void lsx_power_spectrum(int n, double const * in, double * out);
 void lsx_power_spectrum_f(int n, float const * in, float * out);
